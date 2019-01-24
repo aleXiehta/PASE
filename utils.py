@@ -58,8 +58,8 @@ class DataLoader():
 
     def normalize(self, spec):
         mean = np.mean(spec, axis=1).reshape(self.fft_size // 2 + 1, 1)
-        var = np.var(spec, axis=1).reshape(self.fft_size // 2 + 1, 1)
-        spec_norm = (spec - mean) / (var + eps)
+        std = np.std(spec, axis=1).reshape(self.fft_size // 2 + 1, 1)
+        spec_norm = (spec - mean) / (std + eps)
 
         return spec_norm
 
@@ -100,7 +100,7 @@ class DataLoader():
         clean_real, clean_imag = self.wav2spec(clean)
 
         truncate_size = self.truncate_size
-        start_idx = random.randint(0, clean_real.shape[1] - truncate_size + 1)
+        start_idx = random.randint(0, clean_real.shape[1] - truncate_size)
 
         noisy_real, noisy_imag = \
                 noisy_real[:, start_idx:start_idx + truncate_size], \

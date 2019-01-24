@@ -76,103 +76,106 @@ class ComplexBatchNorm2d(nn.Module):
         self.momentum = momentum
         self.training = training
 
-        # trainable
-        self.gamma_rr = nn.Parameter(torch.ones(num_features) / (SQRT_2), requires_grad=True)
-        self.gamma_ii = nn.Parameter(torch.ones(num_features) / (SQRT_2), requires_grad=True)
-        self.gamma_ri = nn.Parameter(torch.zeros(num_features), requires_grad=True)
-        self.beta_real = nn.Parameter(torch.zeros(num_features), requires_grad=True)
-        self.beta_imag = nn.Parameter(torch.zeros(num_features), requires_grad=True)
-
-        # non-tranable
-        self.running_mean_real = torch.ones(num_features) / (SQRT_2)
-        self.running_mean_imag = torch.ones(num_features) / (SQRT_2)
-        self.running_Vrr = torch.ones(num_features) / (SQRT_2)
-        self.running_Vii = torch.ones(num_features) / (SQRT_2)
-        self.running_Vri = torch.zeros(num_features)
+        # trainable and non-trainable
+        self.reset_parameters()
 
     def reset_running_stats(self):
-        self.running_mean_real.zero_() + 1 / SQRT_2
-        self.running_mean_imag.zero_() + 1 / SQRT_2
-        self.running_Vrr.zero_() + 1 / SQRT_2
-        self.running_Vii.zero_() + 1 / SQRT_2
-        self.running_Vri.zero_()
+        self.register_buffer('running_mean_real', torch.ones(self.num_features) / SQRT_2)
+        self.register_buffer('running_mean_imag', torch.ones(self.num_features) / SQRT_2)
+        self.register_buffer('running_Vrr', torch.ones(self.num_features) / SQRT_2)
+        self.register_buffer('running_Vii', torch.ones(self.num_features) / SQRT_2)
+        self.register_buffer('running_Vri', torch.zeros(self.num_features))
 
     def reset_parameters(self):
         self.reset_running_stats()
-        self.gamma_rr.zero_() + 1 / SQRT_2
-        self.gamma_ii.zero_() + 1 / SQRT_2
-        self.gamma_ri.zero_()
-        self.beta_real.zero_()
-        self.beta_imag.zero_()
 
-    def update_running_parameters(self, real_mean, imag_mean, Vrr, Vri, Vii, ch):
-        self.running_mean_real[ch] = self.momentum * self.running_mean_real[ch] + (1. - self.momentum) * real_mean
-        self.running_mean_imag[ch] = self.momentum * self.running_mean_imag[ch] + (1. - self.momentum) * imag_mean
-        self.running_Vrr[ch] = self.momentum * self.running_Vrr[ch] + (1. - self.momentum) * Vrr[ch]
-        self.running_Vri[ch] = self.momentum * self.running_Vri[ch] + (1. - self.momentum) * Vri[ch]
-        self.running_Vii[ch] = self.momentum * self.running_Vii[ch] + (1. - self.momentum) * Vii[ch]
+        self.gamma_rr = nn.Parameter(torch.ones(self.num_features) / (SQRT_2), requires_grad=True)
+        self.gamma_ii = nn.Parameter(torch.ones(self.num_features) / (SQRT_2), requires_grad=True)
+        self.gamma_ri = nn.Parameter(torch.zeros(self.num_features), requires_grad=True)
+        self.beta_real = nn.Parameter(torch.zeros(self.num_features), requires_grad=True)
+        self.beta_imag = nn.Parameter(torch.zeros(self.num_features), requires_grad=True)
+
+    def update_running_parameters(self, real_mean, imag_mean, Vrr, Vri, Vii):
+        self.running_mean_real = self.momentum * self.running_mean_real + (1. - self.momentum) * real_mean
+        self.running_mean_imag = self.momentum * self.running_mean_imag + (1. - self.momentum) * imag_mean
+        self.running_Vrr = self.momentum * self.running_Vrr + (1. - self.momentum) * Vrr
+        self.running_Vri = self.momentum * self.running_Vri + (1. - self.momentum) * Vri
+        self.running_Vii = self.momentum * self.running_Vii + (1. - self.momentum) * Vii
 
     def forward(self, c_input):
-        Vrr = torch.ones(self.num_features) / (SQRT_2)
-        Vii = torch.ones(self.num_features) / (SQRT_2)
+        Vrr = torch.zeros(self.num_features)
+        Vii = torch.zeros(self.num_features)
         Vri = torch.zeros(self.num_features)
 
         real_in, imag_in = c_input[..., 0], c_input[..., 1]
 
-        outputs = []
+        N, C, H, W = real_in.shape
 
-        for ch in range(self.num_features):
-            real = real_in[:, ch, :, :]
-            imag = imag_in[:, ch, :, :]
+        real_mean = real_in.mean((0, 2, 3)) # mean for each channel
+        imag_mean = imag_in.mean((0, 2, 3))
 
-            self.input_shape = real.shape
+        centered_real = real_in - real_mean.view(1, C, 1, 1) # expand dim to fit the shape of inputs
+        centered_imag = real_in - imag_mean.view(1, C, 1, 1)
 
-            real, imag = real.contiguous().view(-1,), imag.contiguous().view(-1,)
+        # frac = 1 / (H * W - 1)
 
-            print(real.shape)
+        if self.training:
+            Vrr = (centered_real ** 2).mean((0, 2, 3)) + self.eps
+            Vri = (centered_real.mul(centered_imag)).mean((0, 2, 3)) #+ self.eps
+            Vii = (centered_imag ** 2).mean((0, 2, 3)) + self.eps
 
-            if self.training:
-                real_mean, imag_mean = real.mean(), imag.mean()
+            self.update_running_parameters(real_mean, imag_mean, Vrr, Vri, Vii)
 
-                centered_real = real - real_mean
-                centered_imag = imag - imag_mean
+            ret = self.complexBN(centered_real, centered_imag, Vrr, Vri, Vii)
 
-                centered_real.unsqueeze_(0)
-                centered_imag.unsqueeze_(0)
+        else:
+            centered_real = real - self.running_mean_real.view(1, C, 1, 1)
+            centered_imag = real - self.running_mean_imag.view(1, C, 1, 1)
 
-                Vrr[ch] = torch.mm(centered_real.t(), centered_real).mean() + self.eps
-                Vri[ch] = torch.mm(centered_real.t(), centered_imag).mean() + self.eps
-                Vii[ch] = torch.mm(centered_imag.t(), centered_imag).mean() + self.eps
+            ret = self.complexBN(centered_real, centered_imag, self.running_Vrr, self.running_Vri, self.running_Vii)
 
-                self.update_running_parameters(real_mean, imag_mean, Vrr, Vri, Vii, ch)
+        return ret
 
-                centered_real.squeeze_(0)
-                centered_imag.squeeze_(0)
+    def complexBN(self, centered_real, centered_imag, Vrr, Vri, Vii):
+        real_std, imag_std = self.complexSTD(centered_real, centered_imag, Vrr, Vri ,Vii)
 
-                outputs.append(self.ComplexBN(centered_real, centered_imag, Vrr, Vri ,Vii, ch))
+        N, C, H, W = real_std.shape
+        
+        res_real = self.gamma_rr.view(1, C, 1, 1) * real_std + \
+                   self.gamma_ri.view(1, C, 1, 1) * imag_std + self.beta_real.view(1, C, 1, 1)
+        res_imag = self.gamma_ri.view(1, C, 1, 1) * real_std + \
+                   self.gamma_ii.view(1, C, 1, 1) * imag_std + self.beta_imag.view(1, C, 1, 1)
 
-            else:
-                centered_real = real - self.running_mean_real
-                centered_imag = real - self.running_mean_imag
+        return torch.stack((res_real, res_imag), dim=-1)
 
-                outputs.append(self.ComplexBN(centered_real, centered_imag, self.running_Vrr, self.running_Vri, self.running_Vii, ch))
+    def complexSTD(self, centered_real, centered_imag, Vrr, Vri, Vii):
+        N, C, H, W = centered_real.shape
 
-        return torch.stack(outputs, dim=0).permute(1, 0, 2, 3, 4)
+        tau = Vrr + Vii
+        delta = (Vrr * Vii) - (Vri ** 2)
 
-    def ComplexBN(self, centered_real, centered_imag, Vrr, Vii, Vri, ch):
-        # Compute square root and inverse of V
-        tau = Vrr[ch] + Vii[ch] # trace, >= 0 because semi positive definite
-        delta = (Vrr[ch] * Vii[ch]) - (Vri[ch] ** 2)
+        s = delta ** 0.5
+        t = (tau + 2 * s) ** 0.5
 
-        s = torch.sqrt(delta)
-        t = torch.sqrt(tau + 2 * s)
+        inverse_st = 1. / (s * t)
 
-        inv_V = torch.Tensor([[Vii[ch] + s, -Vri[ch]], [-Vri[ch], Vrr[ch] + s]]) / (s * t)
-        x_hat = torch.mm(inv_V, torch.stack([centered_real, centered_imag], dim=0)) # shape=(2, b*h*w)
+        print('Vrr', Vrr)
+        print('Vri', Vri)
+        print('Vii', Vii)
 
-        res_real = self.gamma_rr[ch] * x_hat[0] + self.gamma_ri[ch] * x_hat[1] + self.beta_real[ch]
-        res_imag = self.gamma_ri[ch] * x_hat[0] + self.gamma_ii[ch] * x_hat[1] + self.beta_imag[ch]
+        print('delta', delta)
+        print('tau', tau)
+        print('s', s)
+        print('t', t)
+        print('inverse_st', inverse_st)
 
-        real, imag = res_real.view(self.input_shape), res_imag.view(self.input_shape)
+        Wrr = ((Vii + s) * inverse_st).view(1, C, 1, 1)
+        Wii = ((Vrr + s) * inverse_st).view(1, C, 1, 1)
+        Wri = (-Vri * inverse_st).view(1, C, 1, 1)
 
-        return torch.stack((real, imag), dim=-1)
+        assert not any(delta.view(-1,) < 0)
+
+        output_real = Wrr * centered_real + Wri * centered_imag
+        output_imag = Wri * centered_real + Wii * centered_imag
+
+        return output_real, output_imag
