@@ -159,6 +159,7 @@ class ComplexBatchNorm2d(nn.Module):
 
         inverse_st = 1. / (s * t)
 
+        '''
         print('Vrr', Vrr)
         print('Vri', Vri)
         print('Vii', Vii)
@@ -168,6 +169,7 @@ class ComplexBatchNorm2d(nn.Module):
         print('s', s)
         print('t', t)
         print('inverse_st', inverse_st)
+        '''
 
         Wrr = ((Vii + s) * inverse_st).view(1, C, 1, 1)
         Wii = ((Vrr + s) * inverse_st).view(1, C, 1, 1)
